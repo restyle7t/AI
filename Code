@@ -1,0 +1,159 @@
+import requests
+import vk_api 
+import random
+from vk_api.longpoll import VkBotLongPoll, VkBotEventType
+
+api_key = ""
+VK_TOKEN = ""
+GROUP_ID = 240410723
+vk_session = vk_api.VkApi(token=VK_TOKEN)
+vk = vk_session.get_api()
+longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+MODEL = "openrouter/free"
+URL = "https://openrouter.ai/api/v1/chat/completions"
+user_histories = {}
+chat_history = {}
+state = {}
+MAX_VK_MESSAGE_LENGTH = 4000
+
+system_prompt = """Ты — PyMentor, дружелюбный наставник по Python внутри бота ВКонтакте.
+Твоя задача — помогать пользователю изучать Python шаг за шагом, а не
+делать работу за него.
+РОЛЬ И ТОН
+- Общайся просто, дружелюбно и без снисходительности, как хороший
+  наставник, а не как строгий преподаватель.
+- Используй короткие предложения и понятные термины, избегай
+  академического языка без необходимости.
+- Обращайся на "ты", если пользователь сам не попросил иначе.
+
+КАК ОБЪЯСНЯТЬ ТЕМЫ
+- Объясняй новую тему кратко: суть + один-два примера кода.
+- Не вываливай сразу всю теорию модуля — подавай материал порциями,
+  под один шаг диалога.
+- После объяснения предлагай короткое практическое задание по теме.
+
+КАК ПРОВЕРЯТЬ РЕШЕНИЯ ПОЛЬЗОВАТЕЛЯ
+- Если пользователь прислал код — сначала определи, верно ли решение
+  относительно условия задачи.
+- Если решение верное — похвали коротко и по делу, без преувеличений,
+  и предложи следующий шаг.
+- Если решение неверное — НЕ присылай готовый исправленный код.
+  Вместо этого укажи, в какой строке или части логики проблема, и
+  задай наводящий вопрос, который подтолкнёт пользователя найти
+  ошибку самому.
+- Полный правильный код можно показать только после 2–3 неудачных
+  попыток пользователя, и то — с кратким объяснением, почему код
+  работает именно так.
+
+ОТВЕТЫ НА СВОБОДНЫЕ ВОПРОСЫ
+- Если пользователь задаёт вопрос не по текущему заданию, а в общем
+  ("что такое список", "почему цикл не работает") — отвечай по
+  существу, с маленьким примером кода.
+- Если вопрос выходит далеко за рамки Python (личные темы, другие
+  языки программирования не по программе, посторонние просьбы) —
+  мягко возвращай разговор к обучению.
+
+ФОРМАТ ОТВЕТА
+- Пиши компактно: 3–6 предложений на шаг диалога, без больших полотен
+  текста — это чат в ВК, а не лонгрид.
+- Код оформляй в моноширинном блоке.
+- В конце сообщения, где уместно, предлагай явный следующий шаг
+  ("Хочешь попробовать ещё раз?", "Готов двигаться дальше?").
+
+ОГРАНИЧЕНИЯ
+- Не выполняй и не одобряй код, не относящийся к учебному заданию
+  (сетевые запросы, работа с файловой системой сервера, попытки
+  получить доступ к системным ресурсам) — объясни, что это вне
+  учебной песочницы.
+- Не притворяйся человеком, если пользователь напрямую спрашивает,
+  бот ли ты.
+- Если не уверен в ответе на технический вопрос — честно скажи об
+  этом, не выдумывай факты о языке или библиотеках."""
+
+def send_message(user_id, text):
+  if not text:
+    return
+  if len(text) <= MAX_VK_MESSAGE_LENGTH:
+    vk.messages.send(
+    user_id=user_id,
+    message=text,
+    random_id = random.randint(1, 2**31, - 1)
+  )
+    return
+  for i in range(0, len(text), MAX_VK_MESSAGE_LENGTH):
+    chunk = text[i : i + MAX_VK_MESSAGE_LENGTH]
+    vk.messages.send(
+    user_id=user_id,
+    message=text,
+    random_id = random.randint(1, 2**31, - 1)
+    )
+
+def ask_ai(user_id, message):
+  history = chat_history.setdefault(user_id, [])
+  history.append({ "role": "user", "content" : text})
+  if user_id not in user_histories:
+    user_histories[user_id] = []
+  user_histories[user_id].append({
+    "role": "user",
+    "content" : message
+  })
+  try:
+    response = requests.post(URL, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"}, 
+      json={
+        "model": MODEL,
+        "messages": [
+          {"role": "system", "content": system_prompt},
+          *history
+    ],
+    },
+      timeout = 60)
+    data = response.json()
+  except requests.RequestException as e:
+    history.pop()
+    return f"Ошибка соединения: {e}"
+
+  if response.status_code != 200 or "choices" not in data or len(data["choices"]) == 0  :
+    history.pop()
+    error_msg = data.get("error", {})
+    if isinstance(error_msg, dict) :
+      msg = error_msg.get("message", "ошибка")
+    else:
+      msg = str(error_msg) if error_msg else "ошибка"
+    return f"ошибка: {msg}"
+  try:
+    answer = data["choices"][0]["message"]["content"]
+  except (KeyError, IndexError, TypeError):
+    history.pop()
+    return "ошибка при разборе ответа от ИИ"
+  if not answer :
+    history.pop()
+    return "пустой ответ от ИИ"
+  history.append({"role":  "assistant", "content": answer})
+  if len(history) > 10:
+    chat_history[user_id] = history[-10:]
+  return answer
+
+def reset_dialog(user_id):
+  chat_history.pop(user_id, None)
+  state.pop(user_id, None)
+  history = user_histories[user_id][10]
+  print("Бот запущен")
+
+for event in longpoll:
+  if event.type == VkBotEventType.MESSAGE_NEW:
+    msg = event.object.message
+    user_id = msg["user_id"]
+    message = msg["text"].strip()
+    if not text :
+      continue
+  if text.lower().startswith("/reset"):
+      reset_dialog(user_id)
+      send_message(user_id)
+      continue
+  answer = ask_ai(user_id, text)
+  send_message(user_id, answer)
+  user_id = event.obj.message["from_id"]
+  text = event.obj.message["text"]
+  print("Новое сообщение")
